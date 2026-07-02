@@ -1,4 +1,12 @@
 import { useEffect, useRef } from "react";
+import {
+  getOptimizedDpr,
+  getPerfSettings,
+  getViewportSize,
+  isAnimationPaused,
+  isMobileWidth,
+  shouldDrawFrame,
+} from "@/utils/canvasPerf";
 
 interface VoiceBackgroundProps {
   className?: string;
@@ -8,29 +16,57 @@ export function VoiceBackground({ className = "" }: VoiceBackgroundProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frameRef = useRef(0);
   const phaseRef = useRef(0);
+  const perfRef = useRef(getPerfSettings(1280));
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext("2d");
+    const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) return;
 
+    let running = true;
+    let lastDraw = 0;
+
     const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
-      canvas.width = window.innerWidth * dpr;
-      canvas.height = window.innerHeight * dpr;
+      const { w, h } = getViewportSize();
+      if (w < 1 || h < 1) return;
+      perfRef.current = getPerfSettings(w);
+      const dpr = getOptimizedDpr(w);
+      canvas.width = Math.floor(w * dpr);
+      canvas.height = Math.floor(h * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
     resize();
     window.addEventListener("resize", resize);
+    window.addEventListener("orientationchange", resize);
 
-    const draw = () => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
+    const onVisibility = () => {
+      if (!document.hidden) lastDraw = 0;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const draw = (now: number) => {
+      if (!running) return;
+
+      if (isAnimationPaused()) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      const perf = perfRef.current;
+      if (!shouldDrawFrame(now, lastDraw, perf.frameIntervalMs)) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      lastDraw = now;
+
+      const { w, h } = getViewportSize();
       const cx = w / 2;
       const cy = h * 0.42;
-      phaseRef.current += 0.008;
+      const mobile = isMobileWidth(w);
+      const particleCount = mobile ? 22 : 60;
+      phaseRef.current += mobile ? 0.006 : 0.008;
 
       const pulse = 0.5 + Math.sin(phaseRef.current * 1.4) * 0.08;
 
@@ -49,8 +85,7 @@ export function VoiceBackground({ className = "" }: VoiceBackgroundProps) {
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, w, h);
 
-      // Subtle drifting particles across full page
-      for (let p = 0; p < 60; p++) {
+      for (let p = 0; p < particleCount; p++) {
         const angle = p * 2.399 + phaseRef.current * (0.2 + (p % 5) * 0.04);
         const dist =
           Math.min(w, h) * (0.15 + (p % 11) * 0.06) +
@@ -64,16 +99,16 @@ export function VoiceBackground({ className = "" }: VoiceBackgroundProps) {
         ctx.fill();
       }
 
-      // Soft scan shimmer
-      const scanY = ((phaseRef.current * 18) % 1) * h;
-      const scan = ctx.createLinearGradient(0, scanY - 40, 0, scanY + 40);
-      scan.addColorStop(0, "transparent");
-      scan.addColorStop(0.5, "rgba(192, 38, 211, 0.03)");
-      scan.addColorStop(1, "transparent");
-      ctx.fillStyle = scan;
-      ctx.fillRect(0, scanY - 40, w, 80);
+      if (!mobile) {
+        const scanY = ((phaseRef.current * 18) % 1) * h;
+        const scan = ctx.createLinearGradient(0, scanY - 40, 0, scanY + 40);
+        scan.addColorStop(0, "transparent");
+        scan.addColorStop(0.5, "rgba(192, 38, 211, 0.03)");
+        scan.addColorStop(1, "transparent");
+        ctx.fillStyle = scan;
+        ctx.fillRect(0, scanY - 40, w, 80);
+      }
 
-      // Edge vignette
       const vignette = ctx.createRadialGradient(cx, cy, h * 0.2, cx, cy, Math.max(w, h) * 0.75);
       vignette.addColorStop(0, "transparent");
       vignette.addColorStop(1, "rgba(4, 2, 10, 0.55)");
@@ -85,7 +120,10 @@ export function VoiceBackground({ className = "" }: VoiceBackgroundProps) {
 
     frameRef.current = requestAnimationFrame(draw);
     return () => {
+      running = false;
       window.removeEventListener("resize", resize);
+      window.removeEventListener("orientationchange", resize);
+      document.removeEventListener("visibilitychange", onVisibility);
       cancelAnimationFrame(frameRef.current);
     };
   }, []);

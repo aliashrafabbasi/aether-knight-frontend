@@ -105,3 +105,45 @@ body {
 .admin-glow-btn {
   animation: admin-glow-pulse 3s ease-in-out infinite;
 }
+
+@keyframes page-transition-in-mobile {
+  0% {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes subtitle-word-in-mobile {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 767px) {
+  .page-transition {
+    animation: page-transition-in-mobile 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .home-glow-btn,
+  .admin-glow-btn {
+    animation: none;
+  }
+
+  .subtitle-word {
+    animation: subtitle-word-in-mobile 0.18s ease-out both;
+  }
+
+  [class*="backdrop-blur"] {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}

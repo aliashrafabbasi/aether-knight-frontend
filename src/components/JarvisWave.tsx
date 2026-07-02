@@ -1,5 +1,12 @@
 import { useEffect, useRef } from "react";
 import type { VoiceUiState } from "@/types/api";
+import {
+  getOptimizedDpr,
+  getPerfSettings,
+  isAnimationPaused,
+  isMobileWidth,
+  shouldDrawFrame,
+} from "@/utils/canvasPerf";
 
 interface JarvisWaveProps {
   state: VoiceUiState;
@@ -32,6 +39,7 @@ export function JarvisWave({
   const frameRef = useRef(0);
   const phaseRef = useRef(0);
   const ampRef = useRef(0.12);
+  const perfRef = useRef(getPerfSettings(1280));
 
   useEffect(() => {
     if (!audioElement) {
@@ -71,17 +79,41 @@ export function JarvisWave({
     if (!ctx) return;
 
     const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
-      canvas.width = rect.width * dpr;
-      canvas.height = rect.height * dpr;
+      if (rect.width < 1 || rect.height < 1) return;
+      perfRef.current = getPerfSettings(rect.width);
+      const dpr = getOptimizedDpr(rect.width);
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(rect.height * dpr);
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     };
 
     resize();
     window.addEventListener("resize", resize);
 
-    const draw = () => {
+    let running = true;
+    let lastDraw = 0;
+
+    const onVisibility = () => {
+      if (!document.hidden) lastDraw = 0;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
+    const draw = (now: number) => {
+      if (!running) return;
+
+      if (isAnimationPaused()) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      const perf = perfRef.current;
+      if (!shouldDrawFrame(now, lastDraw, perf.frameIntervalMs)) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      lastDraw = now;
+
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
       const cx = w / 2;
@@ -116,10 +148,13 @@ export function JarvisWave({
       ampRef.current += (targetAmp - ampRef.current) * 0.12;
       phaseRef.current += 0.022;
 
-      // Standard orb size — scales gently with container (responsive)
+      const mobile = isMobileWidth(w);
       const sizeBase = Math.min(w, h);
       const responsive = Math.min(Math.max(sizeBase / 400, 0.88), 1.12);
       const baseR = sizeBase * 0.27 * responsive * (1 + ampRef.current * 0.5);
+      const layerCount = mobile ? 4 : WAVE_LAYERS.length;
+      const segments = mobile ? 72 : 180;
+      const useShadow = !mobile;
 
       ctx.clearRect(0, 0, w, h);
 
@@ -135,13 +170,12 @@ export function JarvisWave({
 
       ctx.globalCompositeOperation = "lighter";
 
-      for (let layer = 0; layer < WAVE_LAYERS.length; layer++) {
+      for (let layer = 0; layer < layerCount; layer++) {
         const cfg = WAVE_LAYERS[layer];
         const [r, g, b] = cfg.hue;
         const layerAmp = ampRef.current * (1 - layer * 0.05);
         const radius = baseR * (0.78 + layer * 0.035);
         const rot = phaseRef.current * cfg.speed + cfg.phase;
-        const segments = 180;
 
         ctx.beginPath();
         for (let s = 0; s <= segments; s++) {
@@ -161,8 +195,10 @@ export function JarvisWave({
         const alpha = 0.32 + layerAmp * 0.42 - layer * 0.02;
         ctx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${Math.max(0.14, alpha)})`;
         ctx.lineWidth = 1.2 + layerAmp * 1.6;
-        ctx.shadowColor = `rgba(${r}, ${g}, ${b}, 0.55)`;
-        ctx.shadowBlur = 10 + layerAmp * 16;
+        if (useShadow) {
+          ctx.shadowColor = `rgba(${r}, ${g}, ${b}, 0.55)`;
+          ctx.shadowBlur = 10 + layerAmp * 16;
+        }
         ctx.stroke();
       }
 
@@ -183,7 +219,9 @@ export function JarvisWave({
 
     frameRef.current = requestAnimationFrame(draw);
     return () => {
+      running = false;
       window.removeEventListener("resize", resize);
+      document.removeEventListener("visibilitychange", onVisibility);
       cancelAnimationFrame(frameRef.current);
     };
   }, [state, audioElement, audioActive]);

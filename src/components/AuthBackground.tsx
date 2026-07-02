@@ -1,4 +1,14 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import {
+  getOptimizedDpr,
+  getPerfSettings,
+  getViewportSize,
+  isAnimationPaused,
+  shouldDrawFrame,
+  waveBokehCount,
+  waveGridCols,
+  waveGridRows,
+} from "@/utils/canvasPerf";
 
 interface AuthBackgroundProps {
   children: ReactNode;
@@ -41,34 +51,15 @@ interface SceneLayout {
   particleScale: number;
 }
 
-function getViewportSize() {
-  const vv = window.visualViewport;
-  return {
-    w: Math.round(vv?.width ?? window.innerWidth),
-    h: Math.round(vv?.height ?? window.innerHeight),
-  };
-}
-
 function computeLayout(w: number, h: number): SceneLayout {
   const short = Math.min(w, h);
   const scale = Math.max(0.5, Math.min(1.45, short / 780));
   const isMobile = w < 640;
-  const isTablet = w < 1024;
   const isLandscape = w > h;
-  const isShort = h < 520;
 
-  const cols = isMobile
-    ? Math.max(64, Math.min(100, Math.floor(w / 3.8)))
-    : isTablet
-      ? Math.max(90, Math.min(130, Math.floor(w / 3.2)))
-      : Math.max(120, Math.min(180, Math.floor(w / 2.8)));
+  const cols = waveGridCols(w);
+  const rows = waveGridRows(w, h);
 
-  let rows = 9;
-  if (isMobile && isShort) rows = 6;
-  else if (isMobile) rows = 7;
-  else if (isShort) rows = 7;
-
-  // Keep waves visible above/below the form on every aspect ratio
   let cy = h * 0.52;
   if (isMobile && !isLandscape) cy = h * 0.44;
   else if (isLandscape && h < 500) cy = h * 0.55;
@@ -85,12 +76,12 @@ function computeLayout(w: number, h: number): SceneLayout {
     waveAmp: 38 * scale,
     waveAmp2: 16 * scale,
     waveAmp3: 22 * scale,
-    bokehCount: isMobile ? 14 : isTablet ? 18 : 24,
+    bokehCount: waveBokehCount(w),
     bokehMinR: 45 * scale,
     bokehMaxR: (60 + 110 * scale) * (isMobile ? 0.85 : 1),
     driftX: 28 * scale,
     driftY: 20 * scale,
-    crestStep: isMobile ? 6 : 4,
+    crestStep: isMobile ? 8 : 4,
     crestSize: Math.max(1.4, 2.2 * scale),
     particleScale: Math.max(0.7, scale),
   };
@@ -128,6 +119,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
   const particlesRef = useRef<WaveParticle[]>([]);
   const bokehRef = useRef<BokehLight[]>([]);
   const layoutRef = useRef<SceneLayout>(computeLayout(1280, 800));
+  const perfRef = useRef(getPerfSettings(1280));
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -137,6 +129,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
 
     let running = true;
     let resizeTimer = 0;
+    let lastDraw = 0;
 
     const buildParticles = (layout: SceneLayout) => {
       particlesRef.current = [];
@@ -170,9 +163,9 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
       const { w, h } = getViewportSize();
       const layout = computeLayout(w, h);
       layoutRef.current = layout;
+      perfRef.current = getPerfSettings(w);
 
-      const isMobile = w < 768;
-      const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+      const dpr = getOptimizedDpr(w);
 
       canvas.width = Math.floor(w * dpr);
       canvas.height = Math.floor(h * dpr);
@@ -186,14 +179,18 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
 
     const scheduleResize = () => {
       window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(applyResize, 80);
+      resizeTimer = window.setTimeout(applyResize, 120);
     };
 
     applyResize();
     window.addEventListener("resize", scheduleResize);
     window.addEventListener("orientationchange", scheduleResize);
     window.visualViewport?.addEventListener("resize", scheduleResize);
-    window.visualViewport?.addEventListener("scroll", scheduleResize);
+
+    const onVisibility = () => {
+      if (!document.hidden) lastDraw = 0;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     const start = performance.now();
     const reducedMotion = window.matchMedia(
@@ -202,6 +199,18 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
 
     const draw = (now: number) => {
       if (!running) return;
+
+      if (isAnimationPaused()) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      const perf = perfRef.current;
+      if (!shouldDrawFrame(now, lastDraw, perf.frameIntervalMs)) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      lastDraw = now;
 
       const layout = layoutRef.current;
       const { w, h, cols, rows, cy, rowGap, waveAmp, waveAmp2, waveAmp3 } =
@@ -245,6 +254,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
       ctx.fillRect(0, 0, w, h);
 
       for (const orb of bokehRef.current) {
+        if (perf.skipBokeh) break;
         const ox =
           orb.x + Math.sin(t * orb.speed + orb.phase) * layout.driftX;
         const oy =
@@ -302,6 +312,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
 
       ctx.globalCompositeOperation = "source-over";
 
+      if (!perf.skipCrests) {
       for (let i = 0; i < cols; i += layout.crestStep) {
         const u = i / Math.max(1, cols - 1);
         const x = u * w;
@@ -318,6 +329,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
           ctx.arc(x, y, layout.crestSize, 0, Math.PI * 2);
           ctx.fill();
         }
+      }
       }
 
       const vignette = ctx.createRadialGradient(
@@ -345,7 +357,7 @@ export function AuthBackground({ children }: AuthBackgroundProps) {
       window.removeEventListener("resize", scheduleResize);
       window.removeEventListener("orientationchange", scheduleResize);
       window.visualViewport?.removeEventListener("resize", scheduleResize);
-      window.visualViewport?.removeEventListener("scroll", scheduleResize);
+      document.removeEventListener("visibilitychange", onVisibility);
       cancelAnimationFrame(frameRef.current);
     };
   }, []);

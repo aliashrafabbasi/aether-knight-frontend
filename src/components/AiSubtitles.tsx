@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { isMobileWidth } from "@/utils/canvasPerf";
 
 interface AiSubtitlesProps {
   text: string;
@@ -30,8 +31,10 @@ export function AiSubtitles({ text, audioElement, playing }: AiSubtitlesProps) {
     if (!audio) return;
 
     let raf = 0;
+    let lastRevealUpdate = 0;
+    const revealInterval = isMobileWidth(window.innerWidth) ? 120 : 32;
 
-    const syncWords = () => {
+    const syncWords = (now: number) => {
       const dur = audio.duration;
       if (!dur || !Number.isFinite(dur) || dur <= 0) {
         raf = requestAnimationFrame(syncWords);
@@ -40,11 +43,19 @@ export function AiSubtitles({ text, audioElement, playing }: AiSubtitlesProps) {
 
       const t = audio.currentTime;
       if (t <= 0.05) {
-        setRevealed(0);
+        if (lastRevealUpdate !== 0) {
+          lastRevealUpdate = 0;
+          setRevealed(0);
+        }
       } else {
         const progress = Math.min(1, t / dur);
         const target = Math.min(words.length, Math.ceil(progress * words.length));
-        setRevealed((prev) => (target > prev ? target : prev));
+        if (now - lastRevealUpdate >= revealInterval) {
+          setRevealed((prev) => {
+            if (target > prev) lastRevealUpdate = now;
+            return target > prev ? target : prev;
+          });
+        }
       }
 
       if (!audio.paused && !audio.ended) {

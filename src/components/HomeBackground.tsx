@@ -1,4 +1,14 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import {
+  getOptimizedDpr,
+  getPerfSettings,
+  getViewportSize,
+  isAnimationPaused,
+  shouldDrawFrame,
+  waveBokehCount,
+  waveGridCols,
+  waveGridRows,
+} from "@/utils/canvasPerf";
 
 interface HomeBackgroundProps {
   children: ReactNode;
@@ -41,32 +51,14 @@ interface SceneLayout {
   particleScale: number;
 }
 
-function getViewportSize() {
-  const vv = window.visualViewport;
-  return {
-    w: Math.round(vv?.width ?? window.innerWidth),
-    h: Math.round(vv?.height ?? window.innerHeight),
-  };
-}
-
 function computeLayout(w: number, h: number): SceneLayout {
   const short = Math.min(w, h);
   const scale = Math.max(0.5, Math.min(1.45, short / 780));
   const isMobile = w < 640;
-  const isTablet = w < 1024;
   const isLandscape = w > h;
-  const isShort = h < 520;
 
-  const cols = isMobile
-    ? Math.max(64, Math.min(100, Math.floor(w / 3.8)))
-    : isTablet
-      ? Math.max(90, Math.min(130, Math.floor(w / 3.2)))
-      : Math.max(120, Math.min(180, Math.floor(w / 2.8)));
-
-  let rows = 9;
-  if (isMobile && isShort) rows = 6;
-  else if (isMobile) rows = 7;
-  else if (isShort) rows = 7;
+  const cols = waveGridCols(w);
+  const rows = waveGridRows(w, h);
 
   let cy = h * 0.52;
   if (isMobile && !isLandscape) cy = h * 0.44;
@@ -84,12 +76,12 @@ function computeLayout(w: number, h: number): SceneLayout {
     waveAmp: 38 * scale,
     waveAmp2: 16 * scale,
     waveAmp3: 22 * scale,
-    bokehCount: isMobile ? 14 : isTablet ? 18 : 24,
+    bokehCount: waveBokehCount(w),
     bokehMinR: 45 * scale,
     bokehMaxR: (60 + 110 * scale) * (isMobile ? 0.85 : 1),
     driftX: 28 * scale,
     driftY: 20 * scale,
-    crestStep: isMobile ? 6 : 4,
+    crestStep: isMobile ? 8 : 4,
     crestSize: Math.max(1.4, 2.2 * scale),
     particleScale: Math.max(0.7, scale),
   };
@@ -128,6 +120,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
   const particlesRef = useRef<WaveParticle[]>([]);
   const bokehRef = useRef<BokehLight[]>([]);
   const layoutRef = useRef<SceneLayout>(computeLayout(1280, 800));
+  const perfRef = useRef(getPerfSettings(1280));
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -137,6 +130,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
 
     let running = true;
     let resizeTimer = 0;
+    let lastDraw = 0;
 
     const buildParticles = (layout: SceneLayout) => {
       particlesRef.current = [];
@@ -172,9 +166,9 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
 
       const layout = computeLayout(w, h);
       layoutRef.current = layout;
+      perfRef.current = getPerfSettings(w);
 
-      const isMobile = w < 768;
-      const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.5 : 2);
+      const dpr = getOptimizedDpr(w);
 
       canvas.width = Math.floor(w * dpr);
       canvas.height = Math.floor(h * dpr);
@@ -188,19 +182,35 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
 
     const scheduleResize = () => {
       window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(applyResize, 80);
+      resizeTimer = window.setTimeout(applyResize, 120);
     };
 
     applyResize();
     window.addEventListener("resize", scheduleResize);
     window.addEventListener("orientationchange", scheduleResize);
     window.visualViewport?.addEventListener("resize", scheduleResize);
-    window.visualViewport?.addEventListener("scroll", scheduleResize);
+
+    const onVisibility = () => {
+      if (!document.hidden) lastDraw = 0;
+    };
+    document.addEventListener("visibilitychange", onVisibility);
 
     const start = performance.now();
 
     const draw = (now: number) => {
       if (!running) return;
+
+      if (isAnimationPaused()) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      const perf = perfRef.current;
+      if (!shouldDrawFrame(now, lastDraw, perf.frameIntervalMs)) {
+        frameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+      lastDraw = now;
 
       const layout = layoutRef.current;
       const { w, h, cols, rows, cy, rowGap, waveAmp, waveAmp2, waveAmp3 } =
@@ -255,6 +265,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
 
       // Drifting bokeh orbs
       for (const orb of bokehRef.current) {
+        if (perf.skipBokeh) break;
         const ox = orb.x + Math.sin(t * orb.speed + orb.phase) * layout.driftX;
         const oy = orb.y + Math.cos(t * orb.speed * 0.7 + orb.phase) * layout.driftY;
         const pulse = 0.8 + Math.sin(t * 1.1 + orb.phase) * 0.2;
@@ -309,6 +320,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
       ctx.globalCompositeOperation = "source-over";
 
       // Bright wave crests
+      if (!perf.skipCrests) {
       for (let i = 0; i < cols; i += layout.crestStep) {
         const u = i / Math.max(1, cols - 1);
         const x = u * w;
@@ -325,6 +337,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
           ctx.arc(x, y, layout.crestSize, 0, Math.PI * 2);
           ctx.fill();
         }
+      }
       }
 
       const vignette = ctx.createRadialGradient(
@@ -352,7 +365,7 @@ export function HomeBackground({ children }: HomeBackgroundProps) {
       window.removeEventListener("resize", scheduleResize);
       window.removeEventListener("orientationchange", scheduleResize);
       window.visualViewport?.removeEventListener("resize", scheduleResize);
-      window.visualViewport?.removeEventListener("scroll", scheduleResize);
+      document.removeEventListener("visibilitychange", onVisibility);
       cancelAnimationFrame(frameRef.current);
     };
   }, []);
