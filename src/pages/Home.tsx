@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "react-router-dom";
 import {
@@ -6,6 +7,7 @@ import {
   resumeVoiceChat,
   startVoiceChat,
 } from "@/api/voice";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HomeBackground } from "@/components/HomeBackground";
 import { Nav } from "@/components/Nav";
 import { useAuthStore } from "@/store/authStore";
@@ -24,6 +26,10 @@ export function Home() {
   const navigate = useNavigate();
   const { showToast } = useToast();
   const queryClient = useQueryClient();
+  const [pendingDelete, setPendingDelete] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
 
   const sessionsQuery = useQuery({
     queryKey: ["voice-sessions"],
@@ -65,6 +71,7 @@ export function Home() {
     mutationFn: deleteSession,
     onSuccess: () => {
       showToast("Chat deleted", "success");
+      setPendingDelete(null);
       void queryClient.invalidateQueries({ queryKey: ["voice-sessions"] });
     },
     onError: (err: Error) => {
@@ -75,10 +82,13 @@ export function Home() {
     },
   });
 
-  const handleDelete = (sessionId: string, title: string) => {
-    if (window.confirm(`Delete "${title}"? This cannot be undone.`)) {
-      deleteMutation.mutate(sessionId);
-    }
+  const handleDeleteClick = (sessionId: string, title: string) => {
+    setPendingDelete({ id: sessionId, title });
+  };
+
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    deleteMutation.mutate(pendingDelete.id);
   };
 
   return (
@@ -157,7 +167,7 @@ export function Home() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleDelete(session.id, session.title)}
+                      onClick={() => handleDeleteClick(session.id, session.title)}
                       disabled={deleteMutation.isPending}
                       className="rounded-lg border border-red-500/30 px-4 py-2 text-sm text-red-300 transition hover:bg-red-500/10 disabled:opacity-50"
                     >
@@ -182,6 +192,27 @@ export function Home() {
           </p>
         )}
       </main>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title="Delete this chat?"
+        description={
+          <>
+            <span className="font-medium text-white">
+              &ldquo;{pendingDelete?.title}&rdquo;
+            </span>{" "}
+            will be permanently removed along with all messages. This action
+            cannot be undone.
+          </>
+        }
+        confirmLabel="Delete chat"
+        variant="cosmic"
+        loading={deleteMutation.isPending}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          if (!deleteMutation.isPending) setPendingDelete(null);
+        }}
+      />
     </HomeBackground>
   );
 }
